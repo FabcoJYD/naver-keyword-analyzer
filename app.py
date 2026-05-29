@@ -12,11 +12,22 @@ import streamlit as st
 from requests.exceptions import Timeout, RequestException
 
 try:
-    from streamlit_local_storage import LocalStorage
-    LOCAL_STORAGE_AVAILABLE = True
+    from streamlit_cookies_manager import EncryptedCookieManager
+    COOKIE_MANAGER_AVAILABLE = True
 except Exception:
-    LocalStorage = None
-    LOCAL_STORAGE_AVAILABLE = False
+    EncryptedCookieManager = None
+    COOKIE_MANAGER_AVAILABLE = False
+
+
+# =========================================================
+# Streamlit 기본 화면 설정
+# =========================================================
+
+st.set_page_config(
+    page_title="네이버 키워드 & 카테고리 분석기",
+    page_icon="🔎",
+    layout="wide"
+)
 
 
 # =========================================================
@@ -26,10 +37,58 @@ except Exception:
 SHOPPING_API_URL = "https://openapi.naver.com/v1/search/shop.json"
 SEARCHAD_API_BASE_URL = "https://api.searchad.naver.com"
 
-LOCAL_STORAGE_KEY = "naver_keyword_analyzer_api_settings_v1"
+COOKIE_PREFIX = "naver_keyword_analyzer/"
+COOKIE_SETTINGS_KEY = "api_settings_v1"
 
 REQUEST_TIMEOUT = (30, 60)  # (연결 대기 시간, 응답 대기 시간)
 REQUEST_RETRIES = 3         # 네이버 API 요청 재시도 횟수
+
+
+# =========================================================
+# 쿠키 암호 설정
+# =========================================================
+
+def get_cookie_password():
+    """
+    Streamlit Cloud에서는 Secrets에 등록한 COOKIES_PASSWORD를 사용합니다.
+    로컬 테스트 중 Secrets가 없으면 임시 기본값을 사용합니다.
+    """
+    try:
+        password = st.secrets.get("COOKIES_PASSWORD", "")
+    except Exception:
+        password = ""
+
+    if not password:
+        password = "local-dev-cookie-password-change-this-value"
+
+    return password
+
+
+# =========================================================
+# 쿠키 매니저 초기화
+# =========================================================
+
+cookies = None
+
+if COOKIE_MANAGER_AVAILABLE:
+    try:
+        cookies = EncryptedCookieManager(
+            prefix=COOKIE_PREFIX,
+            password=get_cookie_password(),
+        )
+
+        if not cookies.ready():
+            st.info("브라우저 저장소를 준비 중입니다. 잠시만 기다려주세요.")
+            st.stop()
+
+    except Exception as e:
+        cookies = None
+        st.warning(f"쿠키 저장 기능을 초기화하지 못했습니다: {e}")
+else:
+    st.warning(
+        "streamlit-cookies-manager 패키지를 불러오지 못했습니다. "
+        "requirements.txt에 streamlit-cookies-manager가 포함되어 있는지 확인하세요."
+    )
 
 
 # =========================================================
@@ -78,9 +137,9 @@ def has_all_settings(settings):
     return all(settings.get(key, "").strip() for key in required_keys)
 
 
-def parse_storage_value(raw_value):
+def parse_cookie_settings(raw_value):
     """
-    브라우저 localStorage에서 불러온 문자열을 settings dict로 변환합니다.
+    쿠키에서 불러온 문자열을 settings dict로 변환합니다.
     """
     if raw_value is None:
         return default_settings()
@@ -111,6 +170,57 @@ def sync_form_from_settings(settings):
     st.session_state["form_NAVER_AD_API_KEY"] = settings["NAVER_AD_API_KEY"]
     st.session_state["form_NAVER_AD_SECRET_KEY"] = settings["NAVER_AD_SECRET_KEY"]
     st.session_state["form_NAVER_AD_CUSTOMER_ID"] = settings["NAVER_AD_CUSTOMER_ID"]
+
+
+def load_settings_from_cookie():
+    """
+    브라우저 쿠키에서 저장된 API 설정을 불러옵니다.
+    """
+    if cookies is None:
+        return default_settings()
+
+    try:
+        raw_value = cookies.get(COOKIE_SETTINGS_KEY)
+        return parse_cookie_settings(raw_value)
+    except Exception:
+        return default_settings()
+
+
+def save_settings_to_cookie(settings):
+    """
+    API 설정을 암호화 쿠키에 저장합니다.
+    """
+    if cookies is None:
+        return False, "쿠키 저장 기능을 사용할 수 없습니다."
+
+    try:
+        cookies[COOKIE_SETTINGS_KEY] = json.dumps(
+            normalize_settings(settings),
+            ensure_ascii=False
+        )
+        cookies.save()
+        return True, "이 브라우저에 API 키를 저장했습니다."
+    except Exception as e:
+        return False, f"쿠키 저장 중 오류가 발생했습니다: {e}"
+
+
+def delete_settings_cookie():
+    """
+    저장된 API 설정 쿠키를 삭제합니다.
+    """
+    if cookies is None:
+        return False, "쿠키 저장 기능을 사용할 수 없습니다."
+
+    try:
+        try:
+            del cookies[COOKIE_SETTINGS_KEY]
+        except Exception:
+            cookies[COOKIE_SETTINGS_KEY] = ""
+
+        cookies.save()
+        return True, "저장된 API 키를 삭제했습니다."
+    except Exception as e:
+        return False, f"쿠키 삭제 중 오류가 발생했습니다: {e}"
 
 
 # =========================================================
@@ -615,28 +725,14 @@ def dataframe_to_excel_bytes(df):
 
 
 # =========================================================
-# Streamlit 화면 설정
-# =========================================================
-
-st.set_page_config(
-    page_title="네이버 키워드 & 카테고리 분석기",
-    page_icon="🔎",
-    layout="wide"
-)
-
-st.title("🔎 네이버 키워드 & 카테고리 분석기")
-st.caption("스마트스토어 운영자를 위한 웹앱 | 사용자 본인 API 키로 분석 | 키워드 · 대표 카테고리 · 검색수 · 상품수 · 경쟁강도")
-
-
-# =========================================================
 # 세션 상태 초기화
 # =========================================================
 
 if "api_settings" not in st.session_state:
     st.session_state.api_settings = default_settings()
 
-if "browser_storage_loaded" not in st.session_state:
-    st.session_state.browser_storage_loaded = False
+if "cookie_loaded" not in st.session_state:
+    st.session_state.cookie_loaded = False
 
 if "result_df" not in st.session_state:
     st.session_state.result_df = None
@@ -651,37 +747,25 @@ for key, value in default_settings().items():
 
 
 # =========================================================
-# 브라우저 localStorage 연동
+# 쿠키에서 API 설정 자동 불러오기
 # =========================================================
 
-local_storage = None
+if not st.session_state.cookie_loaded:
+    saved_settings = load_settings_from_cookie()
 
-if LOCAL_STORAGE_AVAILABLE:
-    try:
-        local_storage = LocalStorage()
-    except Exception:
-        local_storage = None
+    if has_all_settings(saved_settings):
+        st.session_state.api_settings = saved_settings
+        sync_form_from_settings(saved_settings)
+
+    st.session_state.cookie_loaded = True
 
 
-if local_storage is not None and not st.session_state.browser_storage_loaded:
-    try:
-        saved_raw = local_storage.getItem(
-            LOCAL_STORAGE_KEY,
-            key="load_api_settings_from_browser"
-        )
+# =========================================================
+# 화면 시작
+# =========================================================
 
-        saved_settings = parse_storage_value(saved_raw)
-
-        if has_all_settings(saved_settings):
-            st.session_state.api_settings = saved_settings
-            sync_form_from_settings(saved_settings)
-            st.session_state.browser_storage_loaded = True
-            st.rerun()
-        else:
-            st.session_state.browser_storage_loaded = True
-
-    except Exception:
-        st.session_state.browser_storage_loaded = True
+st.title("🔎 네이버 키워드 & 카테고리 분석기")
+st.caption("스마트스토어 운영자를 위한 웹앱 | 사용자 본인 API 키로 분석 | 키워드 · 대표 카테고리 · 검색수 · 상품수 · 경쟁강도")
 
 
 # =========================================================
@@ -871,10 +955,10 @@ with tab_analyze:
 with tab_settings:
     st.subheader("API 설정")
 
-    if not LOCAL_STORAGE_AVAILABLE:
+    if not COOKIE_MANAGER_AVAILABLE:
         st.error(
-            "streamlit-local-storage 패키지를 불러오지 못했습니다. "
-            "requirements.txt에 streamlit-local-storage가 포함되어 있는지 확인하세요."
+            "streamlit-cookies-manager 패키지를 불러오지 못했습니다. "
+            "requirements.txt에 streamlit-cookies-manager가 포함되어 있는지 확인하세요."
         )
 
     st.info(
@@ -946,19 +1030,13 @@ with tab_settings:
         st.session_state.api_settings = normalize_settings(new_settings)
 
         if remember_browser:
-            if local_storage is not None:
-                try:
-                    local_storage.setItem(
-                        LOCAL_STORAGE_KEY,
-                        json.dumps(st.session_state.api_settings, ensure_ascii=False),
-                        key="save_api_settings_to_browser"
-                    )
-                    st.success("API 설정이 저장되었습니다. 이 브라우저에 저장도 요청했습니다.")
-                    st.info("다음 접속 때 자동으로 불러오지 않으면 브라우저를 한 번 새로고침해보세요.")
-                except Exception as e:
-                    st.warning(f"현재 세션에는 저장되었지만, 브라우저 저장 중 오류가 발생했습니다: {e}")
+            save_ok, save_msg = save_settings_to_cookie(st.session_state.api_settings)
+
+            if save_ok:
+                st.success(save_msg)
+                st.info("새로고침 후에도 값이 유지되는지 확인해보세요.")
             else:
-                st.warning("현재 세션에는 저장되었지만, 브라우저 저장 기능을 사용할 수 없습니다.")
+                st.warning(save_msg)
         else:
             st.success("API 설정이 현재 세션에만 저장되었습니다. 브라우저를 닫으면 다시 입력해야 할 수 있습니다.")
 
@@ -1000,21 +1078,15 @@ with tab_settings:
         st.session_state.api_settings = empty_settings
         sync_form_from_settings(empty_settings)
         st.session_state.result_df = None
-        st.session_state.browser_storage_loaded = True
+        st.session_state.cookie_loaded = True
 
-        if local_storage is not None:
-            try:
-                local_storage.setItem(
-                    LOCAL_STORAGE_KEY,
-                    "",
-                    key="clear_api_settings_from_browser"
-                )
-                st.success("현재 세션과 브라우저 저장 API 키를 삭제했습니다.")
-                st.info("완전히 반영되지 않으면 브라우저를 새로고침하세요.")
-            except Exception as e:
-                st.warning(f"현재 세션은 삭제했지만, 브라우저 저장값 삭제 중 오류가 발생했습니다: {e}")
+        delete_ok, delete_msg = delete_settings_cookie()
+
+        if delete_ok:
+            st.success(delete_msg)
+            st.info("완전히 반영되지 않으면 브라우저를 새로고침하세요.")
         else:
-            st.success("현재 세션의 API 키를 삭제했습니다.")
+            st.warning(delete_msg)
 
 
 # =========================================================
@@ -1052,12 +1124,15 @@ with tab_help:
 [API 설정] 탭에서 **이 브라우저에 API 키 저장**을 체크하고 저장하면,  
 같은 PC·같은 브라우저·같은 앱 주소로 다시 접속할 때 API 키를 자동으로 불러올 수 있습니다.
 
+이번 버전은 브라우저 쿠키 저장 방식을 사용합니다.  
+쿠키 저장이 차단된 브라우저 환경에서는 자동 불러오기가 되지 않을 수 있습니다.
+
 단, 아래 경우에는 다시 입력해야 할 수 있습니다.
 
 - 다른 PC에서 접속
 - 다른 브라우저에서 접속
 - 시크릿 모드 사용
-- 브라우저 데이터 삭제
+- 브라우저 쿠키 삭제
 - 앱 주소 변경
 
 ---

@@ -2,4 +2,4 @@ streamlit
 requests
 pandas
 openpyxl
-streamlit-local-storage
+streamlit-cookies-manager
