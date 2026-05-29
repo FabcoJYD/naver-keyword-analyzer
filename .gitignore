@@ -1,0 +1,23 @@
+# API 키나 개인 설정 파일 업로드 방지
+settings.json
+.env
+*.env
+
+# Python 캐시 파일
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit 로컬 설정
+.streamlit/secrets.toml
+
+# OS / 편집기 파일
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 엑셀 결과 파일
+*.xlsx
+*.csv
