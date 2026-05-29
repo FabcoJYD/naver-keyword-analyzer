@@ -9,6 +9,7 @@ from io import BytesIO
 import pandas as pd
 import requests
 import streamlit as st
+from requests.exceptions import Timeout, RequestException
 
 try:
     from streamlit_local_storage import LocalStorage
@@ -26,6 +27,9 @@ SHOPPING_API_URL = "https://openapi.naver.com/v1/search/shop.json"
 SEARCHAD_API_BASE_URL = "https://api.searchad.naver.com"
 
 LOCAL_STORAGE_KEY = "naver_keyword_analyzer_api_settings_v1"
+
+REQUEST_TIMEOUT = (30, 60)  # (연결 대기 시간, 응답 대기 시간)
+REQUEST_RETRIES = 3         # 네이버 API 요청 재시도 횟수
 
 
 # =========================================================
@@ -107,6 +111,45 @@ def sync_form_from_settings(settings):
     st.session_state["form_NAVER_AD_API_KEY"] = settings["NAVER_AD_API_KEY"]
     st.session_state["form_NAVER_AD_SECRET_KEY"] = settings["NAVER_AD_SECRET_KEY"]
     st.session_state["form_NAVER_AD_CUSTOMER_ID"] = settings["NAVER_AD_CUSTOMER_ID"]
+
+
+# =========================================================
+# 네이버 API 요청 공통 함수
+# =========================================================
+
+def naver_get_with_retry(url, headers=None, params=None, timeout=REQUEST_TIMEOUT, retries=REQUEST_RETRIES):
+    """
+    네이버 API 요청 공통 함수입니다.
+
+    Streamlit Cloud 환경에서는 일시적으로 ConnectTimeout이 발생할 수 있어
+    재시도 로직을 넣었습니다.
+    """
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=timeout
+            )
+            return response
+
+        except Timeout as e:
+            last_error = e
+            time.sleep(1.5 * attempt)
+
+        except RequestException as e:
+            last_error = e
+            time.sleep(1.5 * attempt)
+
+    raise Exception(
+        "네이버 API 서버 연결 시간이 초과되었습니다. "
+        "잠시 후 다시 시도해주세요. "
+        "로컬에서는 정상인데 Streamlit Cloud에서만 반복된다면 "
+        "Streamlit Cloud 서버와 네이버 API 서버 간 네트워크 연결 문제일 수 있습니다."
+    ) from last_error
 
 
 # =========================================================
@@ -211,11 +254,12 @@ def get_related_keywords(keyword, settings):
 
     headers = get_searchad_headers(method, uri, settings)
 
-    response = requests.get(
+    response = naver_get_with_retry(
         url,
         headers=headers,
         params=params,
-        timeout=20
+        timeout=REQUEST_TIMEOUT,
+        retries=REQUEST_RETRIES
     )
 
     if response.status_code != 200:
@@ -303,11 +347,12 @@ def get_shopping_info(keyword, settings):
         "exclude": "used:rental:cbshop",
     }
 
-    response = requests.get(
+    response = naver_get_with_retry(
         SHOPPING_API_URL,
         headers=headers,
         params=params,
-        timeout=20
+        timeout=REQUEST_TIMEOUT,
+        retries=REQUEST_RETRIES
     )
 
     if response.status_code != 200:
@@ -485,17 +530,22 @@ def test_shopping_api(settings):
         "sort": "sim",
     }
 
-    response = requests.get(
-        SHOPPING_API_URL,
-        headers=headers,
-        params=params,
-        timeout=10
-    )
+    try:
+        response = naver_get_with_retry(
+            SHOPPING_API_URL,
+            headers=headers,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+            retries=REQUEST_RETRIES
+        )
 
-    if response.status_code == 200:
-        return True, "쇼핑 검색 API 연결 정상"
+        if response.status_code == 200:
+            return True, "쇼핑 검색 API 연결 정상"
 
-    return False, f"쇼핑 검색 API 오류: {response.status_code} / {response.text}"
+        return False, f"쇼핑 검색 API 오류: {response.status_code} / {response.text}"
+
+    except Exception as e:
+        return False, f"쇼핑 검색 API 연결 실패: {str(e)}"
 
 
 def test_searchad_api(settings):
@@ -513,17 +563,22 @@ def test_searchad_api(settings):
         "showDetail": "1",
     }
 
-    response = requests.get(
-        url,
-        headers=headers,
-        params=params,
-        timeout=10
-    )
+    try:
+        response = naver_get_with_retry(
+            url,
+            headers=headers,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+            retries=REQUEST_RETRIES
+        )
 
-    if response.status_code == 200:
-        return True, "검색광고 API 연결 정상"
+        if response.status_code == 200:
+            return True, "검색광고 API 연결 정상"
 
-    return False, f"검색광고 API 오류: {response.status_code} / {response.text}"
+        return False, f"검색광고 API 오류: {response.status_code} / {response.text}"
+
+    except Exception as e:
+        return False, f"검색광고 API 연결 실패: {str(e)}"
 
 
 # =========================================================
@@ -622,9 +677,11 @@ if local_storage is not None and not st.session_state.browser_storage_loaded:
             sync_form_from_settings(saved_settings)
             st.session_state.browser_storage_loaded = True
             st.rerun()
+        else:
+            st.session_state.browser_storage_loaded = True
 
     except Exception:
-        pass
+        st.session_state.browser_storage_loaded = True
 
 
 # =========================================================
@@ -916,7 +973,7 @@ with tab_settings:
             st.error("API 키 5개가 모두 입력되어 있어야 테스트할 수 있습니다.")
 
         else:
-            with st.spinner("API 연결을 테스트 중입니다."):
+            with st.spinner("API 연결을 테스트 중입니다. 최대 2~3분 정도 걸릴 수 있습니다."):
                 shopping_ok, shopping_msg = test_shopping_api(current_settings)
                 searchad_ok, searchad_msg = test_searchad_api(current_settings)
 
@@ -1056,4 +1113,14 @@ with tab_help:
 | 10 이상 | 매우 높음 |
 
 경쟁강도는 공식 지표가 아니라, 상품수와 검색수를 이용해 만든 내부 참고 지표입니다.
+
+---
+
+### 8. 연결 오류 안내
+
+Streamlit Cloud 서버에서 네이버 API로 연결이 지연될 경우  
+API 연결 테스트가 실패할 수 있습니다.
+
+이 경우 잠시 후 다시 시도해보세요.  
+반복적으로 실패한다면 Streamlit Cloud 서버와 네이버 API 서버 간 네트워크 문제일 수 있습니다.
     """)
